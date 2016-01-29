@@ -150,10 +150,10 @@ XPCOMUtils.defineLazyGetter(this, "gMessageManager", function () {
 
     focusId: NFC.SYSTEM_APP_ID,
 
-    init: function init(nfc) {
+    init: function init(nfc, debug) {
       this.nfc = nfc;
 
-      if (!NFC.DEBUG_NFC) {
+      if (!debug) {
         let lock = gSettingsService.createLock();
         lock.get(NFC.SETTING_NFC_DEBUG, this.nfc);
         Services.obs.addObserver(this, NFC.TOPIC_MOZSETTINGS_CHANGED, false);
@@ -510,7 +510,8 @@ var SessionHelper = {
 };
 
 function Nfc() {
-  gMessageManager.init(this);
+  let debug = (arguments.length > 0 && arguments[0]) || NFC.DEBUG_NFC;
+  gMessageManager.init(this, debug);
 
   this.targetsByRequestId = {};
 }
