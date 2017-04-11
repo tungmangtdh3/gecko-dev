@@ -89,7 +89,89 @@ public:
 
   static bool ShutdownHasStarted();
 
+  // Enum array index of  string preference which is defined in
+  // SafeBrowsingPrefs.h
+  enum SBStringPreferences
+  {
+#define SB_STRING_PREF(name, macroName) eString##macroName,
+#define SB_BOOL_PREF(name, macroName, defaultValue)
+#include "SafeBrowsingPrefs.h"
+#undef SB_STRING_PREF
+#undef SB_BOOL_PREF
+  eStringPrefCount
+  };
+
+  typedef struct {
+    const char*         name;
+    nsCString           value;
+    SBStringPreferences id;
+  } StringPreference;
+
+  // Store preferences in arrays
+  StringPreference mStringPreferences[eStringPrefCount] = {
+#define SB_STRING_PREF(name, macroName)                               \
+  { name,                                                             \
+    NS_LITERAL_CSTRING(""),                                           \
+    eString##macroName                                                \
+  },
+#define SB_BOOL_PREF(name, macroName, defaultValue)
+#include "SafeBrowsingPrefs.h"
+#undef SB_STRING_PREF
+#undef SB_BOOL_PREF
+  };
+
+  enum SBBoolPreferences
+  {
+#define SB_STRING_PREF(name, macroName)
+#define SB_BOOL_PREF(name, macroName, defaultValue)      eBool##macroName,
+#include "SafeBrowsingPrefs.h"
+#undef SB_BOOL_PREF
+#undef SB_STRING_PREF
+  eBoolPrefCount
+  };
+
+  typedef struct {
+    const char*         name;
+    bool                value;
+    bool                defaultValue;
+    SBBoolPreferences   id;
+  } BoolPreference;
+
+  // Store preferences in arrays
+  BoolPreference mBoolPreferences[eBoolPrefCount] = {
+#define SB_BOOL_PREF(name, macroName, defaultValue)                     \
+    { name,                                                             \
+      defaultValue,                                                     \
+      defaultValue,                                                     \
+      eBool##macroName                                                  \
+    },
+#define SB_STRING_PREF(name, macroName)
+#include "SafeBrowsingPrefs.h"
+#undef SB_STRING_PREF
+#undef SB_BOOL_PREF
+  };
+
+  // Define getter function of preferences
+#define SB_STRING_PREF(name, macroName)                                \
+  const nsCString Get##macroName()                                     \
+  {                                                                    \
+    return mStringPreferences[eString##macroName].value;               \
+  }
+
+#define SB_BOOL_PREF(name, macroName, defaultValue)                    \
+  bool Get##macroName()                                                \
+  {                                                                    \
+    return mBoolPreferences[eBool##macroName].value;                   \
+  }
+#include "SafeBrowsingPrefs.h"
+#undef SB_STRING_PREF
+#undef SB_BOOL_PREF
+
+  BoolPreference* GetBoolPreferences() { return mBoolPreferences; }
+  StringPreference* GetStringPreferences() { return mStringPreferences; }
+
 private:
+
   // No subclassing
   ~nsUrlClassifierDBService();
 
@@ -108,28 +190,15 @@ private:
   nsresult CheckClean(const nsACString &lookupKey,
                       bool *clean);
 
-  // Read everything into mGethashTables and mDisallowCompletionTables
+  // Cache table from prefs
   nsresult ReadTablesFromPrefs();
 
-  // Build a comma-separated list of tables to check
-  void BuildTables(bool trackingProtectionEnabled, nsCString& tables);
+  void AppendTables(const nsCString& aTables, nsCString &outTables);
 
   RefPtr<nsUrlClassifierDBServiceWorker> mWorker;
   RefPtr<UrlClassifierDBServiceWorkerProxy> mWorkerProxy;
 
   nsInterfaceHashtable<nsCStringHashKey, nsIUrlClassifierHashCompleter> mCompleters;
-
-  // TRUE if the nsURIClassifier implementation should check for malware
-  // uris on document loads.
-  bool mCheckMalware;
-
-  // TRUE if the nsURIClassifier implementation should check for phishing
-  // uris on document loads.
-  bool mCheckPhishing;
-
-  // TRUE if the nsURIClassifier implementation should check for blocked
-  // uris on document loads.
-  bool mCheckBlockedURIs;
 
   // TRUE if a BeginUpdate() has been called without an accompanying
   // CancelUpdate()/FinishUpdate().  This is used to prevent competing
@@ -143,8 +212,15 @@ private:
   // The list of tables that should never be hash completed.
   nsTArray<nsCString> mDisallowCompletionsTables;
 
+  // Comma-separated list of tables to use in lookups.
+  nsCString mTrackingProtectionTables;
+  nsCString mBaseTables;
+
   // Thread that we do the updates on.
   static nsIThread* gDbBackgroundThread;
+  static void StringPrefChanged(const char* aPrefName, void* aClosure);
+  static void BoolPrefChanged(const char* aPrefName, void* aClosure);
+
 };
 
 class nsUrlClassifierDBServiceWorker final : public nsIUrlClassifierDBService

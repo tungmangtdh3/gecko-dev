@@ -48,17 +48,126 @@ namespace net {
 //
 static LazyLogModule gChannelClassifierLog("nsChannelClassifier");
 
-// Whether channels should be annotated as being on the tracking protection
-// list.
-static bool sAnnotateChannelEnabled = false;
-// Whether the priority of the channels annotated as being on the tracking
-// protection list should be lowered.
-static bool sLowerNetworkPriority = false;
-static bool sIsInited = false;
 
 #undef LOG
 #define LOG(args)     MOZ_LOG(gChannelClassifierLog, LogLevel::Debug, args)
 #define LOG_ENABLED() MOZ_LOG_TEST(gChannelClassifierLog, LogLevel::Debug)
+
+#define URLCLASSIFIER_SKIP_HOSTNAMES       "urlclassifier.skipHostnames"
+#define URLCLASSIFIER_TRACKING_WHITELIST   "urlclassifier.trackingWhitelistTable"
+
+static const char* kUrlClassifierPrefs[] = {
+  URLCLASSIFIER_SKIP_HOSTNAMES,
+  URLCLASSIFIER_TRACKING_WHITELIST
+};
+
+// Put CachedPrefs in anonymous namespace to avoid any collision from outside of
+// this file.
+namespace {
+
+/**
+ * It is not recommended to read from Preference everytime a channel is
+ * connected.
+ * That is not fast and we should cache preference values and reuse them
+ */
+class CachedPrefs final
+{
+public:
+  static CachedPrefs* GetInstance();
+
+  void Init();
+  bool IsAllowListExample() { return sAllowListExample;}
+  bool IsLowerNetworkPriority() { return sLowerNetworkPriority;}
+  bool IsAnnotateChannelEnabled() { return sAnnotateChannelEnabled;}
+  nsCString GetTrackingWhiteList() { return mTrackingWhitelist; }
+  void SetTrackingWhiteList(const nsACString& aList) { mTrackingWhitelist = aList; }
+  nsCString GetSkipHostnames() { return mSkipHostnames; }
+  void SetSkipHostnames(const nsACString& aHostnames) { mSkipHostnames = aHostnames; }
+
+private:
+  friend class StaticAutoPtr<CachedPrefs>;
+  CachedPrefs();
+  ~CachedPrefs();
+
+  static void OnPrefsChange(const char* aPrefName, void* );
+
+  // Whether channels should be annotated as being on the tracking protection
+  // list.
+  static bool sAnnotateChannelEnabled;
+  // Whether the priority of the channels annotated as being on the tracking
+  // protection list should be lowered.
+  static bool sLowerNetworkPriority;
+  static bool sAllowListExample;
+
+  nsCString mTrackingWhitelist;
+  nsCString mSkipHostnames;
+
+  static StaticAutoPtr<CachedPrefs> sInstance;
+};
+
+bool CachedPrefs::sAllowListExample = false;
+bool CachedPrefs::sLowerNetworkPriority = false;
+bool CachedPrefs::sAnnotateChannelEnabled = false;
+
+StaticAutoPtr<CachedPrefs> CachedPrefs::sInstance;
+
+// static
+void
+CachedPrefs::OnPrefsChange(const char* aPref, void* aClosure)
+{
+  CachedPrefs* prefs = static_cast<CachedPrefs*> (aClosure);
+
+  if (!strcmp(aPref, URLCLASSIFIER_SKIP_HOSTNAMES)) {
+    nsCString skipHostnames = Preferences::GetCString(URLCLASSIFIER_SKIP_HOSTNAMES);
+    ToLowerCase(skipHostnames);
+    prefs->SetSkipHostnames(skipHostnames);
+  } else if (!strcmp(aPref, URLCLASSIFIER_TRACKING_WHITELIST)) {
+    nsCString trackingWhitelist = Preferences::GetCString(URLCLASSIFIER_TRACKING_WHITELIST);
+    prefs->SetTrackingWhiteList(trackingWhitelist);
+  }
+}
+
+void
+CachedPrefs::Init()
+{
+  Preferences::AddBoolVarCache(&sAnnotateChannelEnabled,
+                               "privacy.trackingprotection.annotate_channels");
+  Preferences::AddBoolVarCache(&sLowerNetworkPriority,
+                               "privacy.trackingprotection.lower_network_priority");
+  Preferences::AddBoolVarCache(&sAllowListExample,
+                               "channelclassifier.allowlist_example");
+  for (size_t i = 0; i < ArrayLength(kUrlClassifierPrefs); i++) {
+    Preferences::RegisterCallbackAndCall(CachedPrefs::OnPrefsChange, kUrlClassifierPrefs[i], this);
+  }
+}
+
+// static
+CachedPrefs*
+CachedPrefs::GetInstance()
+{
+  if (!sInstance) {
+    sInstance = new CachedPrefs();
+    sInstance->Init();
+    ClearOnShutdown(&sInstance);
+  }
+  MOZ_ASSERT(sInstance);
+  return sInstance;
+}
+
+CachedPrefs::CachedPrefs()
+{
+  MOZ_COUNT_CTOR(CachedPrefs);
+}
+
+CachedPrefs::~CachedPrefs()
+{
+  MOZ_COUNT_DTOR(CachedPrefs);
+
+  for (size_t i = 0; i < ArrayLength(kUrlClassifierPrefs); i++) {
+    Preferences::UnregisterCallback(CachedPrefs::OnPrefsChange, kUrlClassifierPrefs[i], this);
+  }
+}
+} // anonymous namespace
 
 NS_IMPL_ISUPPORTS(nsChannelClassifier,
                   nsIURIClassifierCallback,
@@ -71,13 +180,6 @@ nsChannelClassifier::nsChannelClassifier(nsIChannel *aChannel)
     mTrackingProtectionEnabled(Nothing())
 {
   MOZ_ASSERT(mChannel);
-  if (!sIsInited) {
-    sIsInited = true;
-    Preferences::AddBoolVarCache(&sAnnotateChannelEnabled,
-                                 "privacy.trackingprotection.annotate_channels");
-    Preferences::AddBoolVarCache(&sLowerNetworkPriority,
-                                 "privacy.trackingprotection.lower_network_priority");
-  }
 }
 
 nsresult
@@ -156,8 +258,8 @@ nsChannelClassifier::ShouldEnableTrackingProtectionInternal(nsIChannel *aChannel
     nsCOMPtr<nsIIOService> ios = do_GetService(NS_IOSERVICE_CONTRACTID, &rv);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    const char ALLOWLIST_EXAMPLE_PREF[] = "channelclassifier.allowlist_example";
-    if (!topWinURI && Preferences::GetBool(ALLOWLIST_EXAMPLE_PREF, false)) {
+    bool isAllowListExample = CachedPrefs::GetInstance()->IsAllowListExample();
+    if (!topWinURI && isAllowListExample) {
       LOG(("nsChannelClassifier[%p]: Allowlisting test domain\n", this));
       rv = ios->NewURI(NS_LITERAL_CSTRING("http://allowlisted.example.com"),
                        nullptr, nullptr, getter_AddRefs(topWinURI));
@@ -365,14 +467,11 @@ nsChannelClassifier::StartInternal()
     NS_ENSURE_SUCCESS(rv, rv);
     if (hasFlags) return NS_ERROR_UNEXPECTED;
 
-    // Skip whitelisted hostnames.
-    nsAutoCString whitelisted;
-    Preferences::GetCString("urlclassifier.skipHostnames", &whitelisted);
-    if (!whitelisted.IsEmpty()) {
-      ToLowerCase(whitelisted);
+    nsCString skipHostnames = CachedPrefs::GetInstance()->GetSkipHostnames();
+    if (!skipHostnames.IsEmpty()) {
       LOG(("nsChannelClassifier[%p]:StartInternal whitelisted hostnames = %s",
-           this, whitelisted.get()));
-      if (IsHostnameWhitelisted(uri, whitelisted)) {
+           this, skipHostnames.get()));
+      if (IsHostnameWhitelisted(uri, skipHostnames)) {
         return NS_ERROR_UNEXPECTED;
       }
     }
@@ -411,7 +510,8 @@ nsChannelClassifier::StartInternal()
     }
     // The classify is running in parent process, no need to give a valid event
     // target
-    rv = uriClassifier->Classify(principal, nullptr, sAnnotateChannelEnabled | trackingProtectionEnabled,
+    bool isAnnotateChannelEnabled = CachedPrefs::GetInstance()->IsAnnotateChannelEnabled();
+    rv = uriClassifier->Classify(principal, nullptr, isAnnotateChannelEnabled | trackingProtectionEnabled,
                                  this, &expectCallback);
     if (NS_FAILED(rv)) {
         return rv;
@@ -733,10 +833,8 @@ nsChannelClassifier::IsTrackerWhitelisted(const nsACString& aList,
     do_GetService(NS_URICLASSIFIERSERVICE_CONTRACTID, &rv);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  nsAutoCString tables;
-  Preferences::GetCString("urlclassifier.trackingWhitelistTable", &tables);
-
-  if (tables.IsEmpty()) {
+  nsCString trackingWhitelist = CachedPrefs::GetInstance()->GetTrackingWhiteList();
+  if (trackingWhitelist.IsEmpty()) {
     LOG(("nsChannelClassifier[%p]:IsTrackerWhitelisted whitelist disabled",
          this));
     return NS_ERROR_TRACKING_URI;
@@ -780,7 +878,7 @@ nsChannelClassifier::IsTrackerWhitelisted(const nsACString& aList,
     new IsTrackerWhitelistedCallback(this, aList, aProvider, aPrefix,
                                      whitelistEntry);
 
-  return uriClassifier->AsyncClassifyLocalWithTables(whitelistURI, tables, cb);
+  return uriClassifier->AsyncClassifyLocalWithTables(whitelistURI, trackingWhitelist, cb);
 }
 
 NS_IMETHODIMP
@@ -823,7 +921,8 @@ nsChannelClassifier::OnClassifyCompleteInternal(nsresult aErrorCode,
 
       if (aErrorCode == NS_ERROR_TRACKING_URI &&
           !mTrackingProtectionEnabled.valueOr(false)) {
-        if (sAnnotateChannelEnabled) {
+        bool isAnnotateChannelEnabled = CachedPrefs::GetInstance()->IsAnnotateChannelEnabled();
+        if (isAnnotateChannelEnabled) {
           nsCOMPtr<nsIParentChannel> parentChannel;
           NS_QueryNotificationCallbacks(mChannel, parentChannel);
           if (parentChannel) {
@@ -837,7 +936,8 @@ nsChannelClassifier::OnClassifyCompleteInternal(nsresult aErrorCode,
           }
         }
 
-        if (sLowerNetworkPriority) {
+        bool isLowerNetworkPriority = CachedPrefs::GetInstance()->IsLowerNetworkPriority();
+        if (isLowerNetworkPriority) {
           if (LOG_ENABLED()) {
             nsCOMPtr<nsIURI> uri;
             mChannel->GetURI(getter_AddRefs(uri));
